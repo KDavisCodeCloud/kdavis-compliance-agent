@@ -111,5 +111,17 @@ reimplementation per repo, not a shared dependency).
 
 ## Current status
 
-Phase: 1 (CIS AWS Foundations Benchmark v3.0.0, AWS-only) in progress. See
-`EXECUTION_ORDER.md`.
+Phase: 1 complete (2026-09-11). Migration applied to the shared prod DB,
+deployed to Railway (project `kdavis-compliance-agent`, service id
+`86459a87-54b7-4fca-9031-f185d4d4b1a3`,
+`kdavis-compliance-agent-production.up.railway.app`), dedicated
+`compliance-agent-service` IAM user created (sts:AssumeRole only,
+permanent infrastructure). Verified fully live end-to-end: real tenant
+created, real IAM role created in Kelvin's AWS account, connected,
+scanned -- returned an accurate CIS v3.0.0 report (readiness_score 50,
+reflecting the account's real IAM MFA/key-rotation state). Test role and
+test tenant row destroyed immediately after verification, per standing
+cloud-resource-cleanup instruction. 33 tests, 100% coverage on
+`compliance/`, `api/routes/`, `core/aws_onboarding.py`.
+
+See `EXECUTION_ORDER.md` for Phase 2+.
