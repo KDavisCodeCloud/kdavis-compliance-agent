@@ -38,3 +38,28 @@ class TestBuildGapReport:
         for control in report["controls"]:
             assert control["security_hub_id"]
             assert isinstance(control["exact_match"], bool)
+
+    def test_accepts_a_different_framework_via_optional_kwargs(self):
+        """Added for Azure: a second CIS mapping (e.g. a future
+        compliance/cis_azure_mapping.py) reuses this same function via
+        these optional kwargs rather than duplicating the readiness-
+        score/coverage-note logic. Defaults keep every AWS test above
+        passing unchanged."""
+        fake_controls = [
+            {
+                "control_id": "9.1",
+                "security_hub_id": "FAKE.1",
+                "title": "Fake control",
+                "exact_match": True,
+                "caveat": None,
+                "match": lambda findings: len(findings) == 0,
+            }
+        ]
+        report = build_gap_report([], framework_name="Fake Framework v1", controls=fake_controls, total_controls=10)
+
+        assert report["framework"] == "Fake Framework v1"
+        assert report["controls_assessed"] == 1
+        assert report["controls_total_in_framework"] == 10
+        assert report["readiness_score"] == 100
+        assert "Fake Framework v1" in report["coverage_note"]
+        assert "10" in report["coverage_note"]

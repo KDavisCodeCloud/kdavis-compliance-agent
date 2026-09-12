@@ -1,11 +1,21 @@
 """Compliance scan triggering and reporting.
 
-POST /tenants/{tenant_id}/scan   -- assumes the tenant's stored AWS role
-                                     fresh, runs kdavis-cloud-audit's
-                                     AWSProvider, sanitizes, builds a CIS
-                                     v3.0.0 gap report, stores it, returns
-                                     it synchronously.
+POST /tenants/{tenant_id}/scan   -- builds fresh credentials for whichever
+                                     provider the tenant connected, runs
+                                     kdavis-cloud-audit's matching
+                                     Provider, sanitizes, builds a CIS gap
+                                     report, stores it, returns it
+                                     synchronously.
 GET  /tenants/{tenant_id}/report -- retrieves the latest report.
+
+Azure scanning is intentionally not wired up yet: it depends on a new
+kdavis-cloud-audit AzureProvider collector (Microsoft Defender for
+Cloud's Regulatory Compliance API) that hasn't shipped, which in turn is
+blocked on completing a real interactive `az login` with MFA -- see
+EXECUTION_ORDER.md. Azure onboarding (api/routes/tenants.py) works today
+so a tenant can connect ahead of that; scanning returns a clear 501
+until compliance/cis_azure_mapping.py exists, rather than fabricating a
+report with an invented control count.
 """
 
 import logging
@@ -46,6 +56,43 @@ def _row_to_response(row) -> ScanReportResponse:
     )
 
 
+def _collect_findings_and_build_report(tenant: dict) -> dict:
+    """Builds fresh credentials, runs the matching kdavis-cloud-audit
+    Provider, and returns a CIS gap report. Raises HTTPException for any
+    problem that should stop the scan before it starts (no verified
+    credentials, unsupported provider) -- distinct from a scan that
+    starts but fails partway, which trigger_scan below catches and
+    stores as a 'failed' scan row rather than raising."""
+    provider = tenant["connected_provider"]
+
+    if provider == "aws":
+        if tenant["status"] != "active" or not tenant["aws_role_arn"]:
+            raise HTTPException(status_code=400, detail="Tenant has no verified AWS role yet")
+        session = assume_role_session(tenant["aws_role_arn"], tenant["aws_external_id"])
+
+        from audit.providers.aws import AWSProvider  # deferred: heavy import, only needed on scan
+        from audit.sanitizer import sanitize_findings
+
+        sanitized = sanitize_findings(AWSProvider(session=session).collect())
+        return build_gap_report([f.to_dict() for f in sanitized])
+
+    if provider == "azure":
+        # See this module's docstring: Azure CIS mapping isn't built yet,
+        # deliberately -- not a fabricated report with an invented
+        # control count. Onboarding (tenants.py) works today so a tenant
+        # can connect ahead of this shipping.
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Azure CIS Foundations Benchmark scanning is not available yet -- "
+                "the tenant is connected and ready, this will work once "
+                "compliance/cis_azure_mapping.py ships in a follow-up phase."
+            ),
+        )
+
+    raise HTTPException(status_code=400, detail="Tenant has not connected a cloud provider yet")
+
+
 @router.post("/{tenant_id}/scan", response_model=ScanReportResponse, status_code=201)
 async def trigger_scan(
     tenant_id: str,
@@ -54,23 +101,16 @@ async def trigger_scan(
 ) -> ScanReportResponse:
     if str(tenant["id"]) != tenant_id:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    if tenant["status"] != "active" or not tenant["aws_role_arn"]:
-        raise HTTPException(status_code=400, detail="Tenant has no verified AWS role yet")
 
-    try:
-        session = assume_role_session(tenant["aws_role_arn"], tenant["aws_external_id"])
-    except AssumeRoleError as exc:
-        raise HTTPException(status_code=400, detail=f"Could not assume role: {exc}") from exc
-
-    from audit.providers.aws import AWSProvider  # deferred: heavy import, only needed on scan
-    from audit.sanitizer import sanitize_findings
-
+    provider = tenant["connected_provider"]
     start = time.time()
     try:
-        findings = AWSProvider(session=session).collect()
-        sanitized = sanitize_findings(findings)
-        report = build_gap_report([f.to_dict() for f in sanitized])
+        report = _collect_findings_and_build_report(tenant)
         status_value, error_message = "ready", None
+    except HTTPException:
+        raise  # pre-flight rejection (no creds, unsupported provider) -- not a "scan ran and failed" case
+    except AssumeRoleError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not assume role: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 - convert any scan/report failure into a stored, descriptive error
         log.warning("[Compliance] scan failed for tenant=%s: %s", tenant_id, exc)
         report, status_value, error_message = None, "failed", str(exc)
@@ -82,10 +122,11 @@ async def trigger_scan(
             INSERT INTO compliance_scans (
                 tenant_id, provider, framework, status,
                 readiness_score, controls_assessed, report_json, error_message, completed_at
-            ) VALUES ($1, 'aws', $2, $3, $4, $5, $6, $7, NOW())
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
             RETURNING id, tenant_id, provider, status, report_json, error_message, started_at, completed_at
             """,
             tenant_id,
+            provider,
             report["framework"] if report else None,
             status_value,
             report["readiness_score"] if report else None,

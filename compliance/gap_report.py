@@ -29,9 +29,18 @@ _DOCUMENTATION_CHECKLIST = [
 ]
 
 
-def build_gap_report(findings: list[dict]) -> dict:
+def build_gap_report(
+    findings: list[dict],
+    framework_name: str = FRAMEWORK_NAME,
+    controls: list = CIS_V3_CONTROLS,
+    total_controls: int = CIS_V3_TOTAL_CONTROLS,
+) -> dict:
+    """Framework-agnostic by design: the AWS CIS v3.0.0 mapping is the
+    default, but the same readiness-score/coverage-note logic serves any
+    CisControl-shaped mapping (e.g. a future compliance/cis_azure_mapping.py)
+    by passing framework_name/controls/total_controls explicitly."""
     results = []
-    for control in CIS_V3_CONTROLS:
+    for control in controls:
         passed = control["match"](findings)
         results.append(
             {
@@ -48,19 +57,18 @@ def build_gap_report(findings: list[dict]) -> dict:
     controls_assessed = len(results)
 
     return {
-        "framework": FRAMEWORK_NAME,
+        "framework": framework_name,
         "controls_assessed": controls_assessed,
-        "controls_total_in_framework": CIS_V3_TOTAL_CONTROLS,
+        "controls_total_in_framework": total_controls,
         "readiness_score": round(passing / controls_assessed * 100) if controls_assessed else 0,
         "controls": results,
         "coverage_note": (
             f"This report automatically assesses {controls_assessed} of "
-            f"{CIS_V3_TOTAL_CONTROLS} {FRAMEWORK_NAME} controls -- the ones "
-            "this scan can verify from AWS API data alone. The remaining "
-            "controls need either additional automated checks (planned, "
-            "see EXECUTION_ORDER.md Phase 2) or manual review. The "
-            "readiness score reflects only the assessed subset -- it is "
-            "not a complete CIS assessment."
+            f"{total_controls} {framework_name} controls -- the ones "
+            "this scan can verify from API data alone. The remaining "
+            "controls need either additional automated checks or manual "
+            "review. The readiness score reflects only the assessed "
+            "subset -- it is not a complete assessment."
         ),
         "documentation_checklist": _DOCUMENTATION_CHECKLIST,
     }

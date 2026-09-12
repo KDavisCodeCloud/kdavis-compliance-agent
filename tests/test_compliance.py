@@ -36,7 +36,7 @@ def _fake_finding(title: str):
 class TestTriggerScan:
     async def test_tenant_id_mismatch_404(self):
         request = _make_request(AsyncMock())
-        fake_tenant = {"id": uuid4(), "status": "active", "aws_role_arn": "arn:x", "aws_external_id": "ext"}
+        fake_tenant = {"id": uuid4(), "status": "active", "connected_provider": "aws", "aws_role_arn": "arn:x", "aws_external_id": "ext"}
         with pytest.raises(HTTPException) as exc:
             await compliance.trigger_scan(str(uuid4()), request, tenant=fake_tenant)
         assert exc.value.status_code == 404
@@ -44,10 +44,41 @@ class TestTriggerScan:
     async def test_no_verified_role_yet_400(self):
         tenant_id = uuid4()
         request = _make_request(AsyncMock())
-        fake_tenant = {"id": tenant_id, "status": "pending_setup", "aws_role_arn": None, "aws_external_id": "ext"}
+        fake_tenant = {
+            "id": tenant_id,
+            "status": "pending_setup",
+            "connected_provider": "aws",
+            "aws_role_arn": None,
+            "aws_external_id": "ext",
+        }
         with pytest.raises(HTTPException) as exc:
             await compliance.trigger_scan(str(tenant_id), request, tenant=fake_tenant)
         assert exc.value.status_code == 400
+
+    async def test_no_provider_connected_400(self):
+        tenant_id = uuid4()
+        request = _make_request(AsyncMock())
+        fake_tenant = {"id": tenant_id, "status": "pending_setup", "connected_provider": None}
+        with pytest.raises(HTTPException) as exc:
+            await compliance.trigger_scan(str(tenant_id), request, tenant=fake_tenant)
+        assert exc.value.status_code == 400
+        assert "not connected a cloud provider" in exc.value.detail
+
+    async def test_azure_scan_not_available_yet_501(self):
+        """Onboarding works (api/routes/tenants.py), but scanning is
+        deliberately gated until compliance/cis_azure_mapping.py ships --
+        see api/routes/compliance.py's module docstring for why."""
+        tenant_id = uuid4()
+        request = _make_request(AsyncMock())
+        fake_tenant = {
+            "id": tenant_id,
+            "status": "active",
+            "connected_provider": "azure",
+            "azure_client_secret_encrypted": "encrypted",
+        }
+        with pytest.raises(HTTPException) as exc:
+            await compliance.trigger_scan(str(tenant_id), request, tenant=fake_tenant)
+        assert exc.value.status_code == 501
 
     async def test_assume_role_failure_returns_400(self):
         tenant_id = uuid4()
@@ -55,6 +86,7 @@ class TestTriggerScan:
         fake_tenant = {
             "id": tenant_id,
             "status": "active",
+            "connected_provider": "aws",
             "aws_role_arn": "arn:aws:iam::222222222222:role/x",
             "aws_external_id": "ext",
         }
@@ -86,6 +118,7 @@ class TestTriggerScan:
         fake_tenant = {
             "id": tenant_id,
             "status": "active",
+            "connected_provider": "aws",
             "aws_role_arn": "arn:aws:iam::222222222222:role/x",
             "aws_external_id": "ext",
         }
@@ -104,7 +137,8 @@ class TestTriggerScan:
 
         insert_args = conn.fetchrow.await_args.args
         assert insert_args[1] == str(tenant_id)  # tenant_id
-        assert insert_args[3] == "ready"  # status_value
+        assert insert_args[2] == "aws"  # provider
+        assert insert_args[4] == "ready"  # status_value
 
     async def test_scan_failure_is_stored_not_raised(self):
         tenant_id = uuid4()
@@ -126,6 +160,7 @@ class TestTriggerScan:
         fake_tenant = {
             "id": tenant_id,
             "status": "active",
+            "connected_provider": "aws",
             "aws_role_arn": "arn:aws:iam::222222222222:role/x",
             "aws_external_id": "ext",
         }
