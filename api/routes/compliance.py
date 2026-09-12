@@ -8,14 +8,14 @@ POST /tenants/{tenant_id}/scan   -- builds fresh credentials for whichever
                                      synchronously.
 GET  /tenants/{tenant_id}/report -- retrieves the latest report.
 
-Azure scanning is intentionally not wired up yet: it depends on a new
-kdavis-cloud-audit AzureProvider collector (Microsoft Defender for
-Cloud's Regulatory Compliance API) that hasn't shipped, which in turn is
-blocked on completing a real interactive `az login` with MFA -- see
-EXECUTION_ORDER.md. Azure onboarding (api/routes/tenants.py) works today
-so a tenant can connect ahead of that; scanning returns a clear 501
-until compliance/cis_azure_mapping.py exists, rather than fabricating a
-report with an invented control count.
+Azure scanning uses kdavis-cloud-audit's AzureProvider bespoke ARM checks
+(CIS 4.1, 4.17, 7.1, 7.2 -- see audit/providers/azure.py) and
+compliance/cis_azure_mapping.py's CIS Microsoft Azure Foundations
+Benchmark v3.0.0 mapping. These checks are self-contained Reader-scoped
+ARM API calls -- they do not depend on Microsoft Defender for Cloud's
+Regulatory Compliance API, which requires the customer's subscription to
+be on Defender's paid standard pricing tier (confirmed live: a 400 "no
+standard pricing bundle" error on a subscription without it).
 """
 
 import logging
@@ -25,8 +25,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from api.middleware.auth import get_tenant
+from compliance.cis_azure_mapping import CIS_AZURE_CONTROLS, CIS_AZURE_TOTAL_CONTROLS, FRAMEWORK_NAME_AZURE
 from compliance.gap_report import build_gap_report
 from core.aws_onboarding import AssumeRoleError, assume_role_session
+from core.azure_onboarding import build_azure_credential
+from security.encryption import decrypt
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/tenants", tags=["compliance"])
@@ -77,17 +80,25 @@ def _collect_findings_and_build_report(tenant: dict) -> dict:
         return build_gap_report([f.to_dict() for f in sanitized])
 
     if provider == "azure":
-        # See this module's docstring: Azure CIS mapping isn't built yet,
-        # deliberately -- not a fabricated report with an invented
-        # control count. Onboarding (tenants.py) works today so a tenant
-        # can connect ahead of this shipping.
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "Azure CIS Foundations Benchmark scanning is not available yet -- "
-                "the tenant is connected and ready, this will work once "
-                "compliance/cis_azure_mapping.py ships in a follow-up phase."
-            ),
+        if tenant["status"] != "active" or not tenant["azure_client_secret_encrypted"]:
+            raise HTTPException(status_code=400, detail="Tenant has no verified Azure Service Principal yet")
+        credential = build_azure_credential(
+            tenant["azure_tenant_id"],
+            tenant["azure_client_id"],
+            decrypt(tenant["azure_client_secret_encrypted"]),
+        )
+
+        from audit.providers.azure import AzureProvider  # deferred: heavy import, only needed on scan
+        from audit.sanitizer import sanitize_findings
+
+        sanitized = sanitize_findings(
+            AzureProvider(credential=credential, subscription_id=tenant["azure_subscription_id"]).collect()
+        )
+        return build_gap_report(
+            [f.to_dict() for f in sanitized],
+            framework_name=FRAMEWORK_NAME_AZURE,
+            controls=CIS_AZURE_CONTROLS,
+            total_controls=CIS_AZURE_TOTAL_CONTROLS,
         )
 
     raise HTTPException(status_code=400, detail="Tenant has not connected a cloud provider yet")

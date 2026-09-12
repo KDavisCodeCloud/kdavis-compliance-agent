@@ -64,21 +64,65 @@ class TestTriggerScan:
         assert exc.value.status_code == 400
         assert "not connected a cloud provider" in exc.value.detail
 
-    async def test_azure_scan_not_available_yet_501(self):
-        """Onboarding works (api/routes/tenants.py), but scanning is
-        deliberately gated until compliance/cis_azure_mapping.py ships --
-        see api/routes/compliance.py's module docstring for why."""
+    async def test_azure_no_verified_credentials_400(self):
         tenant_id = uuid4()
         request = _make_request(AsyncMock())
         fake_tenant = {
             "id": tenant_id,
-            "status": "active",
+            "status": "pending_setup",
             "connected_provider": "azure",
-            "azure_client_secret_encrypted": "encrypted",
+            "azure_client_secret_encrypted": None,
         }
         with pytest.raises(HTTPException) as exc:
             await compliance.trigger_scan(str(tenant_id), request, tenant=fake_tenant)
-        assert exc.value.status_code == 501
+        assert exc.value.status_code == 400
+
+    async def test_azure_successful_scan_stores_cis_azure_report(self):
+        tenant_id = uuid4()
+        scan_id = uuid4()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "id": scan_id,
+                "tenant_id": tenant_id,
+                "provider": "azure",
+                "status": "ready",
+                "report_json": {
+                    "framework": "CIS Microsoft Azure Foundations Benchmark v3.0.0",
+                    "readiness_score": 75,
+                },
+                "error_message": None,
+                "started_at": datetime.now(timezone.utc),
+                "completed_at": datetime.now(timezone.utc),
+            }
+        )
+        request = _make_request(conn)
+        fake_tenant = {
+            "id": tenant_id,
+            "status": "active",
+            "connected_provider": "azure",
+            "azure_tenant_id": "tenant-x",
+            "azure_client_id": "client-x",
+            "azure_client_secret_encrypted": "encrypted-secret",
+            "azure_subscription_id": "sub-x",
+        }
+
+        fake_provider = MagicMock()
+        fake_provider.collect.return_value = [_fake_finding("CIS 4.1: Secure transfer required is disabled")]
+
+        with (
+            patch("api.routes.compliance.build_azure_credential", return_value=MagicMock()),
+            patch("api.routes.compliance.decrypt", return_value="plaintext-secret"),
+            patch("audit.providers.azure.AzureProvider", return_value=fake_provider),
+        ):
+            result = await compliance.trigger_scan(str(tenant_id), request, tenant=fake_tenant)
+
+        assert result.status == "ready"
+        assert result.report["framework"] == "CIS Microsoft Azure Foundations Benchmark v3.0.0"
+
+        insert_args = conn.fetchrow.await_args.args
+        assert insert_args[2] == "azure"  # provider
+        assert insert_args[4] == "ready"  # status_value
 
     async def test_assume_role_failure_returns_400(self):
         tenant_id = uuid4()
